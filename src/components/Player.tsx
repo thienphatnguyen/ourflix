@@ -26,6 +26,7 @@ import {
   Loader2,
   Sparkles,
   Scaling,
+  FastForward,
 } from "lucide-react";
 
 interface PlayerProps {
@@ -70,6 +71,15 @@ export default function Player({ movie, initialEpisodeSlug }: PlayerProps) {
   const [fitMode, setFitMode] = useState<"contain" | "cover" | "fill">("contain");
   const [fitModeToast, setFitModeToast] = useState<string | null>(null);
   const fitToastTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const [is2xActive, setIs2xActive] = useState<boolean>(false);
+  const [seekFeedback, setSeekFeedback] = useState<"backward" | "forward" | null>(null);
+  const seekFeedbackTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  const holdTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const isHolding2xRef = useRef<boolean>(false);
+  const originalPlaybackRateRef = useRef<number>(1);
+  const preventClickRef = useRef<boolean>(false);
+  const touchStartPosRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
   const [showControls, setShowControls] = useState<boolean>(true);
   const [showSpeedMenu, setShowSpeedMenu] = useState<boolean>(false);
   const [showEpisodeDrawer, setShowEpisodeDrawer] = useState<boolean>(false);
@@ -419,6 +429,213 @@ export default function Player({ movie, initialEpisodeSlug }: PlayerProps) {
     }
   };
 
+  // Hiển thị bong bóng phản hồi khi tua nhanh 10s
+  const showQuickFeedback = (type: "backward" | "forward") => {
+    setSeekFeedback(type);
+    if (seekFeedbackTimeoutRef.current) clearTimeout(seekFeedbackTimeoutRef.current);
+    seekFeedbackTimeoutRef.current = setTimeout(() => {
+      setSeekFeedback(null);
+    }, 650);
+  };
+
+  // 6. TÍNH NĂNG ĐIỆN THOẠI: NHẤN GIỮ MÀN HÌNH ĐỂ SPEED 2X (YOUTUBE / TIKTOK STYLE)
+  const handleTouchStart = (e: React.TouchEvent) => {
+    if (e.touches.length !== 1) return;
+    const touch = e.touches[0];
+    touchStartPosRef.current = { x: touch.clientX, y: touch.clientY };
+
+    if (holdTimerRef.current) clearTimeout(holdTimerRef.current);
+    holdTimerRef.current = setTimeout(() => {
+      const video = videoRef.current;
+      if (!video) return;
+
+      isHolding2xRef.current = true;
+      originalPlaybackRateRef.current = video.playbackRate || 1;
+      video.playbackRate = 2;
+      setIs2xActive(true);
+
+      // Phản hồi rung nhẹ haptic trên điện thoại nếu được hỗ trợ
+      try {
+        if (typeof window !== "undefined" && "vibrate" in navigator) {
+          navigator.vibrate(35);
+        }
+      } catch {}
+    }, 280);
+  };
+
+  const handleTouchMove = (e: React.TouchEvent) => {
+    if (e.touches.length > 0) {
+      const touch = e.touches[0];
+      const dx = Math.abs(touch.clientX - touchStartPosRef.current.x);
+      const dy = Math.abs(touch.clientY - touchStartPosRef.current.y);
+      if (dx > 12 || dy > 12) {
+        if (!isHolding2xRef.current && holdTimerRef.current) {
+          clearTimeout(holdTimerRef.current);
+          holdTimerRef.current = null;
+        }
+      }
+    }
+  };
+
+  const handleTouchEnd = () => {
+    if (holdTimerRef.current) {
+      clearTimeout(holdTimerRef.current);
+      holdTimerRef.current = null;
+    }
+
+    if (isHolding2xRef.current) {
+      const video = videoRef.current;
+      if (video) {
+        video.playbackRate = originalPlaybackRateRef.current || playbackRate || 1;
+      }
+      isHolding2xRef.current = false;
+      setIs2xActive(false);
+
+      preventClickRef.current = true;
+      setTimeout(() => {
+        preventClickRef.current = false;
+      }, 350);
+    }
+  };
+
+  const handleVideoClick = () => {
+    if (preventClickRef.current) return;
+    togglePlay();
+  };
+
+  // Bật/tắt toàn màn hình (Hỗ trợ Desktop, Android tự xoay ngang, và Safari iPhone iOS)
+  const toggleFullscreen = useCallback(async () => {
+    const container = containerRef.current;
+    const video = videoRef.current;
+    if (!container && !video) return;
+
+    try {
+      const isCurrentlyFullscreen = !!(
+        document.fullscreenElement ||
+        (document as any).webkitFullscreenElement ||
+        (document as any).mozFullScreenElement ||
+        (document as any).msFullscreenElement
+      );
+
+      if (!isCurrentlyFullscreen) {
+        if (container?.requestFullscreen) {
+          await container.requestFullscreen();
+          setIsFullscreen(true);
+        } else if ((container as any)?.webkitRequestFullscreen) {
+          (container as any).webkitRequestFullscreen();
+          setIsFullscreen(true);
+        } else if ((container as any)?.msRequestFullscreen) {
+          (container as any).msRequestFullscreen();
+          setIsFullscreen(true);
+        } else if (video && (video as any).webkitEnterFullscreen) {
+          // Trực tiếp cho iPhone iOS Safari
+          (video as any).webkitEnterFullscreen();
+          setIsFullscreen(true);
+          return;
+        }
+
+        // Tự động xoay ngang màn hình trên thiết bị di động nếu được hỗ trợ
+        try {
+          if (screen.orientation && (screen.orientation as any).lock) {
+            await (screen.orientation as any).lock("landscape").catch(() => {});
+          }
+        } catch {}
+      } else {
+        if (document.exitFullscreen) {
+          await document.exitFullscreen();
+        } else if ((document as any).webkitExitFullscreen) {
+          (document as any).webkitExitFullscreen();
+        } else if ((document as any).msExitFullscreen) {
+          (document as any).msExitFullscreen();
+        }
+        setIsFullscreen(false);
+
+        try {
+          if (screen.orientation && (screen.orientation as any).unlock) {
+            (screen.orientation as any).unlock();
+          }
+        } catch {}
+      }
+    } catch {
+      // Fallback khi container fullscreen bị chặn trên Safari iOS
+      if (video && (video as any).webkitEnterFullscreen) {
+        try {
+          (video as any).webkitEnterFullscreen();
+          setIsFullscreen(true);
+        } catch (e) {
+          console.error("Lỗi bật toàn màn hình:", e);
+        }
+      }
+    }
+  }, []);
+
+  // 7. PHÍM TẮT BÀN PHÍM LAPTOP / DESKTOP (Space để Play/Pause, Mũi tên trái/phải để tua 10s)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const activeEl = document.activeElement;
+      if (
+        activeEl &&
+        (activeEl.tagName === "INPUT" ||
+          activeEl.tagName === "TEXTAREA" ||
+          (activeEl as HTMLElement).isContentEditable)
+      ) {
+        return;
+      }
+
+      if (e.code === "Space") {
+        e.preventDefault();
+        togglePlay();
+        handleMouseMove();
+      } else if (e.code === "ArrowLeft") {
+        e.preventDefault();
+        handleSkip(-10);
+        showQuickFeedback("backward");
+        handleMouseMove();
+      } else if (e.code === "ArrowRight") {
+        e.preventDefault();
+        handleSkip(10);
+        showQuickFeedback("forward");
+        handleMouseMove();
+      } else if (e.code === "ArrowUp") {
+        e.preventDefault();
+        setVolume((prev) => {
+          const next = Math.min(1, Math.round((prev + 0.1) * 10) / 10);
+          if (videoRef.current) {
+            videoRef.current.volume = next;
+            videoRef.current.muted = false;
+          }
+          setIsMuted(false);
+          return next;
+        });
+        handleMouseMove();
+      } else if (e.code === "ArrowDown") {
+        e.preventDefault();
+        setVolume((prev) => {
+          const next = Math.max(0, Math.round((prev - 0.1) * 10) / 10);
+          if (videoRef.current) {
+            videoRef.current.volume = next;
+            videoRef.current.muted = next === 0;
+          }
+          setIsMuted(next === 0);
+          return next;
+        });
+        handleMouseMove();
+      } else if (e.code === "KeyF") {
+        e.preventDefault();
+        toggleFullscreen();
+      } else if (e.code === "KeyM") {
+        e.preventDefault();
+        if (videoRef.current) {
+          videoRef.current.muted = !videoRef.current.muted;
+          setIsMuted(videoRef.current.muted);
+        }
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [togglePlay, handleSkip, toggleFullscreen]);
+
   // Đồng bộ sự kiện thoát toàn màn hình (khi ấn nút Back điện thoại hoặc phím ESC)
   useEffect(() => {
     const handleFullscreenChange = () => {
@@ -490,71 +707,6 @@ export default function Player({ movie, initialEpisodeSlug }: PlayerProps) {
     });
   };
 
-  // Bật/tắt toàn màn hình (Hỗ trợ Desktop, Android tự xoay ngang, và Safari iPhone iOS)
-  const toggleFullscreen = async () => {
-    const container = containerRef.current;
-    const video = videoRef.current;
-    if (!container && !video) return;
-
-    try {
-      const isCurrentlyFullscreen = !!(
-        document.fullscreenElement ||
-        (document as any).webkitFullscreenElement ||
-        (document as any).mozFullScreenElement ||
-        (document as any).msFullscreenElement
-      );
-
-      if (!isCurrentlyFullscreen) {
-        if (container?.requestFullscreen) {
-          await container.requestFullscreen();
-          setIsFullscreen(true);
-        } else if ((container as any)?.webkitRequestFullscreen) {
-          (container as any).webkitRequestFullscreen();
-          setIsFullscreen(true);
-        } else if ((container as any)?.msRequestFullscreen) {
-          (container as any).msRequestFullscreen();
-          setIsFullscreen(true);
-        } else if (video && (video as any).webkitEnterFullscreen) {
-          // Trực tiếp cho iPhone iOS Safari
-          (video as any).webkitEnterFullscreen();
-          setIsFullscreen(true);
-          return;
-        }
-
-        // Tự động xoay ngang màn hình trên thiết bị di động nếu được hỗ trợ
-        try {
-          if (screen.orientation && (screen.orientation as any).lock) {
-            await (screen.orientation as any).lock("landscape").catch(() => {});
-          }
-        } catch {}
-      } else {
-        if (document.exitFullscreen) {
-          await document.exitFullscreen();
-        } else if ((document as any).webkitExitFullscreen) {
-          (document as any).webkitExitFullscreen();
-        } else if ((document as any).msExitFullscreen) {
-          (document as any).msExitFullscreen();
-        }
-        setIsFullscreen(false);
-
-        try {
-          if (screen.orientation && (screen.orientation as any).unlock) {
-            (screen.orientation as any).unlock();
-          }
-        } catch {}
-      }
-    } catch {
-      // Fallback khi container fullscreen bị chặn trên Safari iOS
-      if (video && (video as any).webkitEnterFullscreen) {
-        try {
-          (video as any).webkitEnterFullscreen();
-          setIsFullscreen(true);
-        } catch (e) {
-          console.error("Lỗi bật toàn màn hình:", e);
-        }
-      }
-    }
-  };
 
   // Format thời gian hiển thị mm:ss hoặc hh:mm:ss
   const formatTime = (secs: number) => {
@@ -572,6 +724,10 @@ export default function Player({ movie, initialEpisodeSlug }: PlayerProps) {
     <div
       ref={containerRef}
       onMouseMove={handleMouseMove}
+      onTouchStart={handleTouchStart}
+      onTouchMove={handleTouchMove}
+      onTouchEnd={handleTouchEnd}
+      onTouchCancel={handleTouchEnd}
       className="relative w-full h-screen min-h-[100dvh] bg-black text-white overflow-hidden select-none flex items-center justify-center font-sans"
     >
       {/* THẺ VIDEO THUẦN HLS (KHÔNG CHỨA IFRAME / KHÔNG QUẢNG CÁO) */}
@@ -585,7 +741,7 @@ export default function Player({ movie, initialEpisodeSlug }: PlayerProps) {
             ? "object-fill"
             : "object-contain"
         }`}
-        onClick={togglePlay}
+        onClick={handleVideoClick}
         onDoubleClick={toggleFitMode}
         onTimeUpdate={() => {
           if (videoRef.current) {
@@ -618,6 +774,28 @@ export default function Player({ movie, initialEpisodeSlug }: PlayerProps) {
       {isBuffering && (
         <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-20">
           <Loader2 className="w-14 h-14 text-netflix-red animate-spin" />
+        </div>
+      )}
+
+      {/* BADGE BÁO HIỆU ĐANG TUA 2X KHI GIỮ TAY TRÊN ĐIỆN THOẠI */}
+      {is2xActive && (
+        <div className="absolute top-6 left-1/2 transform -translate-x-1/2 z-30 px-5 py-2.5 rounded-full bg-black/90 backdrop-blur-md border border-amber-400/80 text-amber-300 text-xs sm:text-sm font-bold flex items-center gap-2 shadow-2xl animate-pulse pointer-events-none">
+          <FastForward className="w-5 h-5 fill-amber-400 text-amber-400" />
+          <span>Đang phát 2X &bull; Thả tay để về tốc độ gốc</span>
+        </div>
+      )}
+
+      {/* HIỆU ỨNG TUA LÙI / TIẾN 10S KHI ẤN MŨI TÊN HOẶC NÚT TUA */}
+      {seekFeedback === "backward" && (
+        <div className="absolute left-10 sm:left-16 top-1/2 transform -translate-y-1/2 z-30 flex flex-col items-center justify-center w-20 h-20 rounded-full bg-black/75 backdrop-blur-md border border-white/20 text-white animate-fade-in pointer-events-none shadow-2xl">
+          <RotateCcw className="w-7 h-7 text-white" />
+          <span className="text-xs font-bold mt-1">-10s</span>
+        </div>
+      )}
+      {seekFeedback === "forward" && (
+        <div className="absolute right-10 sm:right-16 top-1/2 transform -translate-y-1/2 z-30 flex flex-col items-center justify-center w-20 h-20 rounded-full bg-black/75 backdrop-blur-md border border-white/20 text-white animate-fade-in pointer-events-none shadow-2xl">
+          <RotateCw className="w-7 h-7 text-white" />
+          <span className="text-xs font-bold mt-1">+10s</span>
         </div>
       )}
 
@@ -778,17 +956,23 @@ export default function Player({ movie, initialEpisodeSlug }: PlayerProps) {
               </button>
 
               <button
-                onClick={() => handleSkip(-10)}
+                onClick={() => {
+                  handleSkip(-10);
+                  showQuickFeedback("backward");
+                }}
                 className="hover:text-white transition active:scale-90"
-                title="Tua lại 10s"
+                title="Tua lại 10s (Phím mũi tên trái)"
               >
                 <RotateCcw className="w-5 h-5" />
               </button>
 
               <button
-                onClick={() => handleSkip(10)}
+                onClick={() => {
+                  handleSkip(10);
+                  showQuickFeedback("forward");
+                }}
                 className="hover:text-white transition active:scale-90"
-                title="Tua tới 10s"
+                title="Tua tới 10s (Phím mũi tên phải)"
               >
                 <RotateCw className="w-5 h-5" />
               </button>
