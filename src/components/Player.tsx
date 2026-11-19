@@ -157,55 +157,95 @@ export default function Player({ movie, initialEpisodeSlug }: PlayerProps) {
     };
   }, [currentEpisode?.link_m3u8]);
 
-  // 2. Khôi phục tiến độ xem dở từ Supabase (watch_history)
+  // 2. Khôi phục tiến độ xem dở từ Supabase hoặc LocalStorage
   const resumeFromHistory = async () => {
-    if (!isSupabaseConfigured || !videoRef.current) return;
-    try {
-      const { data } = await supabase
-        .from("watch_history")
-        .select("current_time_sec, duration_sec, episode_slug")
-        .eq("movie_slug", movie.slug)
-        .single();
+    if (!videoRef.current) return;
+    let resumeTime = 0;
+    let resumeEp = "";
+    let resumeDur = 0;
 
-      if (data && data.current_time_sec && videoRef.current) {
-        // Chỉ tua nếu cùng tập và chưa xem hết phim (còn hơn 30s)
-        if (
-          data.episode_slug === currentEpisodeSlug &&
-          data.current_time_sec > 5 &&
-          data.duration_sec &&
-          data.current_time_sec < data.duration_sec - 30
-        ) {
-          videoRef.current.currentTime = data.current_time_sec;
+    // A. Thử đọc từ Supabase
+    if (isSupabaseConfigured) {
+      try {
+        const { data } = await supabase
+          .from("watch_history")
+          .select("current_time_sec, duration_sec, episode_slug")
+          .eq("movie_slug", movie.slug)
+          .single();
+
+        if (data && data.current_time_sec) {
+          resumeTime = data.current_time_sec;
+          resumeEp = data.episode_slug;
+          resumeDur = data.duration_sec;
         }
+      } catch (err) {
+        console.error("Lỗi khôi phục lịch sử xem Supabase:", err);
       }
-    } catch (err) {
-      console.error("Lỗi khôi phục lịch sử xem:", err);
+    }
+
+    // B. Fallback LocalStorage nếu Supabase chưa có
+    if (!resumeTime) {
+      try {
+        const localHistory = JSON.parse(localStorage.getItem("ourflix_watch_history") || "[]");
+        if (Array.isArray(localHistory)) {
+          const found = localHistory.find((h: any) => h.movie_slug === movie.slug);
+          if (found && found.current_time_sec) {
+            resumeTime = found.current_time_sec;
+            resumeEp = found.episode_slug;
+            resumeDur = found.duration_sec;
+          }
+        }
+      } catch {}
+    }
+
+    if (
+      resumeTime > 5 &&
+      resumeEp === currentEpisodeSlug &&
+      videoRef.current &&
+      (!resumeDur || resumeTime < resumeDur - 30)
+    ) {
+      videoRef.current.currentTime = resumeTime;
     }
   };
 
-  // 3. Tự động lưu tiến độ xem lên Supabase mỗi 5 giây
+  // 3. Tự động lưu tiến độ xem lên LocalStorage & Supabase mỗi 5 giây
   const saveProgressToSupabase = useCallback(async () => {
-    if (!isSupabaseConfigured || !videoRef.current || !currentProfile || !currentEpisode) return;
+    if (!videoRef.current || !currentProfile || !currentEpisode) return;
     const v = videoRef.current;
     if (v.currentTime <= 0) return;
 
+    const record = {
+      movie_slug: movie.slug,
+      movie_name: movie.name,
+      poster_url: movie.poster_url || movie.thumb_url,
+      episode_slug: currentEpisode.slug,
+      episode_name: currentEpisode.name,
+      current_time_sec: v.currentTime,
+      duration_sec: v.duration || 0,
+      updated_by: currentProfile.name,
+      updated_at: new Date().toISOString(),
+    };
+
+    // A. Lưu ngay vào LocalStorage
     try {
-      await supabase.from("watch_history").upsert(
-        {
-          movie_slug: movie.slug,
-          movie_name: movie.name,
-          poster_url: movie.poster_url || movie.thumb_url,
-          episode_slug: currentEpisode.slug,
-          episode_name: currentEpisode.name,
-          current_time_sec: v.currentTime,
-          duration_sec: v.duration || 0,
-          updated_by: currentProfile.name,
-          updated_at: new Date().toISOString(),
-        },
-        { onConflict: "movie_slug" }
-      );
-    } catch (err) {
-      console.error("Lỗi lưu tiến độ Supabase:", err);
+      const localHistory = JSON.parse(localStorage.getItem("ourflix_watch_history") || "[]");
+      const filtered = Array.isArray(localHistory)
+        ? localHistory.filter((h: any) => h.movie_slug !== movie.slug)
+        : [];
+      filtered.unshift(record);
+      localStorage.setItem("ourflix_watch_history", JSON.stringify(filtered.slice(0, 20)));
+    } catch {}
+
+    // B. Ghi lên Supabase
+    if (isSupabaseConfigured) {
+      try {
+        await supabase.from("watch_history").upsert(
+          record,
+          { onConflict: "movie_slug" }
+        );
+      } catch (err) {
+        console.error("Lỗi lưu tiến độ Supabase:", err);
+      }
     }
   }, [movie, currentEpisode, currentProfile]);
 

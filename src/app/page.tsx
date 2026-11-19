@@ -140,29 +140,78 @@ export default function HomePage() {
     };
   }, [featuredSlug]);
 
-  // 2. Tải & Lắng nghe Realtime từ Supabase (watch_history & couple_movies)
+  // 2. Tải & Lắng nghe Realtime từ Supabase (watch_history & couple_movies) kết hợp LocalStorage Fallback
   const fetchSupabaseData = useCallback(async () => {
+    // A. Luôn nạp tức thì từ LocalStorage (0ms, không phụ thuộc mạng hay Supabase RLS)
+    try {
+      const localCouple = JSON.parse(localStorage.getItem("ourflix_couple_movies") || "[]");
+      if (Array.isArray(localCouple) && localCouple.length > 0) {
+        setCouplePicks(localCouple.filter((m: any) => m.category === "couple_pick"));
+        setFavoriteMovies(localCouple.filter((m: any) => m.category === "favorite"));
+      }
+
+      const localHistory = JSON.parse(localStorage.getItem("ourflix_watch_history") || "[]");
+      if (Array.isArray(localHistory) && localHistory.length > 0) {
+        setWatchHistory(localHistory);
+      }
+    } catch (e) {
+      console.error("Lỗi đọc local data:", e);
+    }
+
     if (!isSupabaseConfigured) return;
 
+    // B. Nạp và hợp nhất dữ liệu từ Supabase Cloud
     try {
-      // Lấy lịch sử xem dở (sắp xếp mới nhất lên đầu)
+      // 1. Lịch sử xem dở
       const { data: historyData } = await supabase
         .from("watch_history")
         .select("*")
         .order("updated_at", { ascending: false })
         .limit(15);
 
-      if (historyData) setWatchHistory(historyData);
+      if (historyData && historyData.length > 0) {
+        let localHistory: any[] = [];
+        try {
+          localHistory = JSON.parse(localStorage.getItem("ourflix_watch_history") || "[]");
+        } catch {}
 
-      // Lấy kho phim cặp đôi (Góc Couple & Kho của Em)
+        const seenHistory = new Set();
+        const mergedHistory = [...historyData, ...localHistory].filter((h: any) => {
+          if (!h.movie_slug || seenHistory.has(h.movie_slug)) return false;
+          seenHistory.add(h.movie_slug);
+          return true;
+        });
+        setWatchHistory(mergedHistory);
+        try {
+          localStorage.setItem("ourflix_watch_history", JSON.stringify(mergedHistory));
+        } catch {}
+      }
+
+      // 2. Kho phim cặp đôi (Góc Couple & Kho của Em)
       const { data: coupleData } = await supabase
         .from("couple_movies")
         .select("*")
         .order("created_at", { ascending: false });
 
-      if (coupleData) {
-        setCouplePicks(coupleData.filter((m) => m.category === "couple_pick"));
-        setFavoriteMovies(coupleData.filter((m) => m.category === "favorite"));
+      if (coupleData && coupleData.length > 0) {
+        let localCouple: any[] = [];
+        try {
+          localCouple = JSON.parse(localStorage.getItem("ourflix_couple_movies") || "[]");
+        } catch {}
+
+        const seenCouple = new Set();
+        const mergedCouple = [...coupleData, ...localCouple].filter((m: any) => {
+          const key = `${m.movie_slug}_${m.category}`;
+          if (!m.movie_slug || seenCouple.has(key)) return false;
+          seenCouple.add(key);
+          return true;
+        });
+
+        setCouplePicks(mergedCouple.filter((m) => m.category === "couple_pick"));
+        setFavoriteMovies(mergedCouple.filter((m) => m.category === "favorite"));
+        try {
+          localStorage.setItem("ourflix_couple_movies", JSON.stringify(mergedCouple));
+        } catch {}
       }
     } catch (err) {
       console.error("Lỗi lấy dữ liệu Supabase:", err);
@@ -428,6 +477,13 @@ export default function HomePage() {
         onClose={() => setNoteModalConfig((prev) => ({ ...prev, isOpen: false }))}
         movie={noteModalConfig.movie}
         category={noteModalConfig.category}
+        isAlreadySaved={
+          noteModalConfig.movie
+            ? noteModalConfig.category === "couple_pick"
+              ? couplePickSlugs.has(noteModalConfig.movie.slug)
+              : favoriteSlugs.has(noteModalConfig.movie.slug)
+            : false
+        }
         onSuccess={fetchSupabaseData}
       />
       {/* WIDGET CHAT CẶP ĐÔI NỔI GÓC DƯỚI BÊN PHẢI (THU GỌN TINH TẾ) */}
