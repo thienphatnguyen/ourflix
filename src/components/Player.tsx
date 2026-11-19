@@ -25,6 +25,7 @@ import {
   Layers,
   Loader2,
   Sparkles,
+  Scaling,
 } from "lucide-react";
 
 interface PlayerProps {
@@ -66,6 +67,9 @@ export default function Player({ movie, initialEpisodeSlug }: PlayerProps) {
   const [isMuted, setIsMuted] = useState<boolean>(false);
   const [playbackRate, setPlaybackRate] = useState<number>(1);
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
+  const [fitMode, setFitMode] = useState<"contain" | "cover" | "fill">("contain");
+  const [fitModeToast, setFitModeToast] = useState<string | null>(null);
+  const fitToastTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const [showControls, setShowControls] = useState<boolean>(true);
   const [showSpeedMenu, setShowSpeedMenu] = useState<boolean>(false);
   const [showEpisodeDrawer, setShowEpisodeDrawer] = useState<boolean>(false);
@@ -375,17 +379,140 @@ export default function Player({ movie, initialEpisodeSlug }: PlayerProps) {
     }
   };
 
-  // Bật/tắt toàn màn hình
-  const toggleFullscreen = () => {
-    const container = containerRef.current;
-    if (!container) return;
+  // Đồng bộ sự kiện thoát toàn màn hình (khi ấn nút Back điện thoại hoặc phím ESC)
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      const isFull = !!(
+        document.fullscreenElement ||
+        (document as any).webkitFullscreenElement ||
+        (document as any).mozFullScreenElement ||
+        (document as any).msFullscreenElement
+      );
+      setIsFullscreen(isFull);
+      if (!isFull) {
+        try {
+          if (screen.orientation && (screen.orientation as any).unlock) {
+            (screen.orientation as any).unlock();
+          }
+        } catch {}
+      }
+    };
 
-    if (!document.fullscreenElement) {
-      container.requestFullscreen().catch(() => {});
-      setIsFullscreen(true);
-    } else {
-      document.exitFullscreen().catch(() => {});
-      setIsFullscreen(false);
+    document.addEventListener("fullscreenchange", handleFullscreenChange);
+    document.addEventListener("webkitfullscreenchange", handleFullscreenChange);
+    document.addEventListener("mozfullscreenchange", handleFullscreenChange);
+    document.addEventListener("MSFullscreenChange", handleFullscreenChange);
+
+    const video = videoRef.current;
+    const handleWebKitBegin = () => setIsFullscreen(true);
+    const handleWebKitEnd = () => setIsFullscreen(false);
+
+    if (video) {
+      video.addEventListener("webkitbeginfullscreen", handleWebKitBegin);
+      video.addEventListener("webkitendfullscreen", handleWebKitEnd);
+    }
+
+    return () => {
+      document.removeEventListener("fullscreenchange", handleFullscreenChange);
+      document.removeEventListener("webkitfullscreenchange", handleFullscreenChange);
+      document.removeEventListener("mozfullscreenchange", handleFullscreenChange);
+      document.removeEventListener("MSFullscreenChange", handleFullscreenChange);
+      if (video) {
+        video.removeEventListener("webkitbeginfullscreen", handleWebKitBegin);
+        video.removeEventListener("webkitendfullscreen", handleWebKitEnd);
+      }
+    };
+  }, []);
+
+  // Bật/tắt chế độ tỉ lệ khung hình (Vừa vặn / Tràn viền màn hình điện thoại / Kéo giãn)
+  const toggleFitMode = () => {
+    setFitMode((prev) => {
+      let next: "contain" | "cover" | "fill" = "contain";
+      let label = "Chuẩn 16:9 (Vừa khung hình)";
+      if (prev === "contain") {
+        next = "cover";
+        label = "Tràn viền màn hình (Zoom đầy điện thoại)";
+      } else if (prev === "cover") {
+        next = "fill";
+        label = "Kéo giãn khít 100% (Stretch)";
+      } else {
+        next = "contain";
+        label = "Chuẩn 16:9 (Vừa khung hình)";
+      }
+
+      setFitModeToast(label);
+      if (fitToastTimeoutRef.current) clearTimeout(fitToastTimeoutRef.current);
+      fitToastTimeoutRef.current = setTimeout(() => {
+        setFitModeToast(null);
+      }, 2500);
+
+      return next;
+    });
+  };
+
+  // Bật/tắt toàn màn hình (Hỗ trợ Desktop, Android tự xoay ngang, và Safari iPhone iOS)
+  const toggleFullscreen = async () => {
+    const container = containerRef.current;
+    const video = videoRef.current;
+    if (!container && !video) return;
+
+    try {
+      const isCurrentlyFullscreen = !!(
+        document.fullscreenElement ||
+        (document as any).webkitFullscreenElement ||
+        (document as any).mozFullScreenElement ||
+        (document as any).msFullscreenElement
+      );
+
+      if (!isCurrentlyFullscreen) {
+        if (container?.requestFullscreen) {
+          await container.requestFullscreen();
+          setIsFullscreen(true);
+        } else if ((container as any)?.webkitRequestFullscreen) {
+          (container as any).webkitRequestFullscreen();
+          setIsFullscreen(true);
+        } else if ((container as any)?.msRequestFullscreen) {
+          (container as any).msRequestFullscreen();
+          setIsFullscreen(true);
+        } else if (video && (video as any).webkitEnterFullscreen) {
+          // Trực tiếp cho iPhone iOS Safari
+          (video as any).webkitEnterFullscreen();
+          setIsFullscreen(true);
+          return;
+        }
+
+        // Tự động xoay ngang màn hình trên thiết bị di động nếu được hỗ trợ
+        try {
+          if (screen.orientation && (screen.orientation as any).lock) {
+            await (screen.orientation as any).lock("landscape").catch(() => {});
+          }
+        } catch {}
+      } else {
+        if (document.exitFullscreen) {
+          await document.exitFullscreen();
+        } else if ((document as any).webkitExitFullscreen) {
+          (document as any).webkitExitFullscreen();
+        } else if ((document as any).msExitFullscreen) {
+          (document as any).msExitFullscreen();
+        }
+        setIsFullscreen(false);
+
+        try {
+          if (screen.orientation && (screen.orientation as any).unlock) {
+            (screen.orientation as any).unlock();
+          }
+        } catch {}
+      }
+    } catch {
+      // Fallback khi container fullscreen bị chặn trên Safari iOS
+      if (video && (video as any).webkitEnterFullscreen) {
+        try {
+          (video as any).webkitEnterFullscreen();
+          setIsFullscreen(true);
+        } catch (e) {
+          console.error("Lỗi bật toàn màn hình:", e);
+        }
+      }
     }
   };
 
@@ -405,14 +532,21 @@ export default function Player({ movie, initialEpisodeSlug }: PlayerProps) {
     <div
       ref={containerRef}
       onMouseMove={handleMouseMove}
-      className="relative w-full h-screen bg-black text-white overflow-hidden select-none flex items-center justify-center font-sans"
+      className="relative w-full h-screen min-h-[100dvh] bg-black text-white overflow-hidden select-none flex items-center justify-center font-sans"
     >
       {/* THẺ VIDEO THUẦN HLS (KHÔNG CHỨA IFRAME / KHÔNG QUẢNG CÁO) */}
       <video
         ref={videoRef}
         playsInline
-        className="w-full h-full object-contain cursor-pointer"
+        className={`w-full h-full cursor-pointer transition-all duration-200 ${
+          fitMode === "cover"
+            ? "object-cover"
+            : fitMode === "fill"
+            ? "object-fill"
+            : "object-contain"
+        }`}
         onClick={togglePlay}
+        onDoubleClick={toggleFitMode}
         onTimeUpdate={() => {
           if (videoRef.current) {
             setCurrentTime(videoRef.current.currentTime);
@@ -444,6 +578,14 @@ export default function Player({ movie, initialEpisodeSlug }: PlayerProps) {
       {isBuffering && (
         <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-20">
           <Loader2 className="w-14 h-14 text-netflix-red animate-spin" />
+        </div>
+      )}
+
+      {/* THÔNG BÁO TỈ LỆ KHUNG HÌNH (TOAST) */}
+      {fitModeToast && (
+        <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 z-30 px-5 py-2.5 rounded-full bg-black/85 backdrop-blur-md border border-white/20 text-white text-xs sm:text-sm font-semibold flex items-center gap-2 pointer-events-none animate-fade-in shadow-2xl">
+          <Scaling className="w-4 h-4 text-couple-pink" />
+          <span>{fitModeToast}</span>
         </div>
       )}
 
@@ -709,6 +851,24 @@ export default function Player({ movie, initialEpisodeSlug }: PlayerProps) {
                 title="Danh sách tập"
               >
                 <Layers className="w-5 h-5" />
+              </button>
+
+              {/* ĐỔI TỈ LỆ KHUNG HÌNH / TRÀN VIỀN (ZOOM TO FILL) */}
+              <button
+                onClick={toggleFitMode}
+                className="hover:text-white transition p-1 text-neutral-300 hover:text-couple-pink flex items-center gap-1"
+                title={`Đổi tỉ lệ màn hình: ${
+                  fitMode === "cover"
+                    ? "Tràn viền màn hình (Zoom)"
+                    : fitMode === "fill"
+                    ? "Kéo giãn khít 100% (Stretch)"
+                    : "Chuẩn 16:9 (Vừa vặn)"
+                }`}
+              >
+                <Scaling className="w-5 h-5" />
+                <span className="text-[10px] hidden sm:inline uppercase font-bold text-couple-pink">
+                  {fitMode === "cover" ? "Zoom" : fitMode === "fill" ? "Fill" : "Fit"}
+                </span>
               </button>
 
               {/* TOÀN MÀN HÌNH */}
